@@ -15,8 +15,8 @@ from dotenv import load_dotenv
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = "8089883587:AAEB2no3NN6OVHRtU0wJ4T2s61zXOySn0ZA"
-TELEGRAM_CHAT_ID = "-1003858659485"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API_URL = "https://etender.mahadiscom.in/eatApp/getTahdrTypeCode/WT"
 ARCHIVE_FILE = "tender_archive.json"
 TARGET_DIVISIONS = {
