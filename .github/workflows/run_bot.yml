@@ -24,7 +24,7 @@ jobs:
 
       - name: Install Required Python Packages
         run: |
-          pip install requests beautifulsoup4 python-telegram-bot python-dotenv schedule
+          pip install requests beautifulsoup4 schedule python-telegram-bot python-dotenv
 
       - name: Execute Tender Scraper
         run: python main.py
