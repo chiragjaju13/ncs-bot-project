@@ -19,17 +19,15 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
-# --- CREDENTIAL MAPPING (Matches your .env exactly) ---
-# It checks the .env name first, then the GitHub Action name as a backup
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-
-ID_MSEDCL = os.getenv("ID_MSEDCL") or os.getenv("TELEGRAM_CHAT_ID_MSEDCL")
-ID_MAHATENDERS = os.getenv("ID_MAHATENDERS") or os.getenv("TELEGRAM_CHAT_ID_MAHATENDERS")
+# --- CREDENTIAL MAPPING (Strictly matching your .env and YAML) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ID_MSEDCL = os.getenv("ID_MSEDCL")
+ID_MAHATENDERS = os.getenv("ID_MAHATENDERS")
 
 # WhatsApp Evolution API
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL") or os.getenv("EVO_URL")
-EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY") or os.getenv("EVO_KEY")
-EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE") or os.getenv("WA_INSTANCE")
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL")
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
+EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE")
 
 WA_GROUP_MSEDCL = os.getenv("WA_GROUP_MSEDCL")
 WA_GROUP_MAHATENDERS = os.getenv("WA_GROUP_MAHATENDERS")
@@ -71,9 +69,10 @@ def save_archive(data):
     with open(ARCHIVE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-def format_epoch(epoch_ms):
+def format_epoch(epoch_ms, include_time=False):
     if not epoch_ms: return "N/A"
-    return datetime.fromtimestamp(epoch_ms / 1000.0).strftime('%d-%m-%Y')
+    fmt = '%d-%m-%Y %H:%M' if include_time else '%d-%m-%Y'
+    return datetime.fromtimestamp(epoch_ms / 1000.0).strftime(fmt)
 
 def format_currency(value):
     try:
@@ -120,11 +119,116 @@ def check_msedcl(pending_msgs, archive):
             
             for d_name, talukas in DISTRICT_DATA.items():
                 if d_name.lower() in combined:
-                    msg = (f"🏢 **MSEDCL ALERT**\n\n🏷️ **Dist:** {d_name}\n🔢 **No:** `{t_no}`\n📝 **Desc:** {desc}\n"
-                           f"⌛ **End:** {format_epoch(item.get('purchaseToDate'))}\n💰 **Amt:** {format_currency(item.get('estimatedCost'))}")
+                    matched_taluka = d_name
+                    for t in talukas:
+                        if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
+                            matched_taluka = t.title()
+                            break
+
+                    tender_fee_raw = item.get("tahdrFees")
+                    if tender_fee_raw is None:
+                        tender_fee = "Not Specified"
+                    else:
+                        base_fee = float(tender_fee_raw)
+                        gst = base_fee * 0.18
+                        tender_fee = f"₹ {base_fee + gst:,.2f}"
+
+                    msg = (
+                        f"🏢 MSEDCL TENDER ALERT\n\n"
+                        f"🏷️ Division: {matched_taluka}\n"
+                        f"🌐 Source: Mahadiscom (MSEDCL)\n"
+                        f"🔢 Tender No: {t_no}\n"
+                        f"📝 Description: {desc}\n"
+                        f"📅 Purchase Start: {format_epoch(item.get('purchaseFromDate'))}\n"
+                        f"⌛ Purchase End: {format_epoch(item.get('purchaseToDate'))}\n"
+                        f"📤 Submission Day: {format_epoch(item.get('technicalBidToDate'), include_time=True)}\n"
+                        f"⚙️ Tech Bid Opening: {format_epoch(item.get('techBidOpenningDate'), include_time=True)}\n"
+                        f"💰 Tender Amount: {format_currency(item.get('estimatedCost'))}\n"
+                        f"💳 EMD Amount: {format_currency(item.get('emdFee'))}\n"
+                        f"📜 Tender Fees: {tender_fee}"
+                    )
                     pending_msgs.setdefault(d_name, []).append((t_no, msg))
                     break
     except Exception as e: print(f"❌ MSEDCL API Error: {e}")
+
+def fetch_mahatender_details(session, detail_url):
+    if not detail_url: return {'amount': 'Not Specified', 'fee': 'Not Specified', 'emd': 'Not Specified'}
+    try:
+        if detail_url.startswith('/'): detail_url = "https://mahatenders.gov.in" + detail_url
+        r = session.get(detail_url, verify=False, timeout=20)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        details = {'amount': 'Not Specified', 'fee': 'Not Specified', 'emd': 'Not Specified'}
+        for td in soup.find_all('td'):
+            text = td.get_text(strip=True)
+            if 'Tender Value in' in text:
+                val = td.find_next_sibling('td')
+                if val: details['amount'] = format_currency(val.get_text(strip=True).replace(',', ''))
+            elif 'Tender Fee in' in text:
+                val = td.find_next_sibling('td')
+                if val: details['fee'] = format_currency(val.get_text(strip=True).replace(',', ''))
+            elif 'EMD Amount in' in text:
+                val = td.find_next_sibling('td')
+                if val: details['emd'] = format_currency(val.get_text(strip=True).replace(',', ''))
+        return details
+    except: return {'amount': 'Not Specified', 'fee': 'Not Specified', 'emd': 'Not Specified'}
+
+def check_mahatenders(pending_msgs, archive):
+    print(f"[{time.strftime('%H:%M:%S')}] Checking Mahatenders Search...")
+    url = "https://mahatenders.gov.in/nicgep/app"
+    s = requests.Session()
+    s.headers.update({'User-Agent': 'Mozilla/5.0'})
+    
+    for dist_name, talukas in DISTRICT_DATA.items():
+        try:
+            r = s.get(url, verify=False, timeout=20)
+            soup = BeautifulSoup(r.text, 'html.parser')
+            form = soup.find('form', id='tenderSearch')
+            if not form: continue
+            
+            data = {inp.get('name'): inp.get('value', '') for inp in form.find_all('input') if inp.get('name')}
+            data['SearchDescription'] = dist_name
+            data['Go'] = 'Go'
+            
+            res = s.post("https://mahatenders.gov.in" + form.get('action'), data=data, verify=False, timeout=20)
+            res_soup = BeautifulSoup(res.text, 'html.parser')
+            table = res_soup.find('table', id='table')
+            if not table: continue
+            
+            for row in table.find_all('tr')[1:]:
+                cols = row.find_all('td')
+                if len(cols) < 6: continue
+                title = cols[4].text.strip()
+                id_match = re.search(r'\d{4}_[A-Z]+_\d+_\d+', title)
+                ref_no = id_match.group(0) if id_match else title[:50]
+                
+                if ref_no in archive: continue
+                
+                combined = title.lower()
+                if dist_name.lower() in combined:
+                    extra = fetch_mahatender_details(s, cols[4].find('a').get('href'))
+                    
+                    matched_taluka = dist_name
+                    for t in talukas:
+                        if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
+                            matched_taluka = t.title()
+                            break
+
+                    msg = (
+                        f"🏛️ MAHATENDERS ALERT\n\n"
+                        f"🏷️ Division: {matched_taluka}\n"
+                        f"🌐 Source: Mahatenders.gov.in\n"
+                        f"🔢 Tender ID: {ref_no}\n"
+                        f"📝 Title: {title}\n"
+                        f"📅 Published Date: {cols[1].text.strip()}\n"
+                        f"⌛ Closing Date: {cols[2].text.strip()}\n"
+                        f"⚙️ Opening Date: {cols[3].text.strip()}\n"
+                        f"💰 Tender Amount: {extra['amount']}\n"
+                        f"💳 EMD Amount: {extra['emd']}\n"
+                        f"📜 Tender Fee: {extra['fee']}\n"
+                        f"🏢 Organisation: {cols[5].text.strip()}"
+                    )
+                    pending_msgs.setdefault(dist_name, []).append((ref_no, msg))
+        except: continue
 
 def job():
     archive_list = load_archive()
@@ -134,18 +238,38 @@ def job():
     # Process MSEDCL
     msedcl_pending = {}
     check_msedcl(msedcl_pending, archive_set)
-    
     for dist, tenders in msedcl_pending.items():
-        for ref, msg in tenders:
-            if ref not in archive_set:
-                # Send to Telegram
-                asyncio.run(send_telegram_message(msg, ID_MSEDCL))
-                # Send to WhatsApp
-                send_whatsapp(msg, WA_GROUP_MSEDCL)
-                
-                archive_set.add(ref)
-                new_ids.append(ref)
-                time.sleep(1)
+        if not tenders: continue
+        has_new = any(ref not in archive_set for ref, msg in tenders)
+        if has_new:
+            header_msg = f"🏙️ **DISTRICT: {dist.upper()} (MSEDCL)**"
+            asyncio.run(send_telegram_message(header_msg, ID_MSEDCL))
+            time.sleep(1)
+            for ref, msg in tenders:
+                if ref not in archive_set:
+                    asyncio.run(send_telegram_message(msg, ID_MSEDCL))
+                    send_whatsapp(msg, WA_GROUP_MSEDCL)
+                    archive_set.add(ref)
+                    new_ids.append(ref)
+                    time.sleep(1)
+
+    # Process MAHATENDERS
+    mahatenders_pending = {}
+    check_mahatenders(mahatenders_pending, archive_set)
+    for dist, tenders in mahatenders_pending.items():
+        if not tenders: continue
+        has_new = any(ref not in archive_set for ref, msg in tenders)
+        if has_new:
+            header_msg = f"🏙️ **DISTRICT: {dist.upper()} (MAHATENDERS)**"
+            asyncio.run(send_telegram_message(header_msg, ID_MAHATENDERS))
+            time.sleep(1)
+            for ref, msg in tenders:
+                if ref not in archive_set:
+                    asyncio.run(send_telegram_message(msg, ID_MAHATENDERS))
+                    send_whatsapp(msg, WA_GROUP_MAHATENDERS)
+                    archive_set.add(ref)
+                    new_ids.append(ref)
+                    time.sleep(1)
 
     if new_ids:
         save_archive(new_ids + archive_list)
@@ -155,13 +279,9 @@ def job():
 
 def main():
     print("🚀 Maharashtra Tender Scraper Started")
-    # Quick debug to console
-    print(f"Targeting Group: {ID_MSEDCL}")
-    
     if os.getenv("GITHUB_ACTIONS") == "true":
         job()
     else:
-        # Local running mode
         job()
         if schedule:
             schedule.every(2).hours.do(job)
