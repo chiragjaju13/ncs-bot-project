@@ -15,15 +15,16 @@ from dotenv import load_dotenv
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ID_MSEDCL = os.getenv("ID_MSEDCL")
-ID_MAHATENDERS = os.getenv("ID_MAHATENDERS")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+ID_MSEDCL = os.getenv("ID_MSEDCL") or os.getenv("TELEGRAM_CHAT_ID_MSEDCL")
+ID_MAHATENDERS = os.getenv("ID_MAHATENDERS") or os.getenv("TELEGRAM_CHAT_ID_MAHATENDERS")
+
 # WhatsApp Config
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL")
-EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
-EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE")
-WA_GROUP_MSEDCL = os.getenv("WA_GROUP_MSEDCL")
-WA_GROUP_MAHATENDERS = os.getenv("WA_GROUP_MAHATENDERS")
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL") or os.getenv("EVO_URL")
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY") or os.getenv("EVO_KEY")
+EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE") or os.getenv("WA_INSTANCE")
+WA_GROUP_MSEDCL = os.getenv("WA_GROUP_MSEDCL") or os.getenv("TELEGRAM_CHAT_ID_MSEDCL") # Assuming similar IDs if not split
+WA_GROUP_MAHATENDERS = os.getenv("WA_GROUP_MAHATENDERS") or os.getenv("TELEGRAM_CHAT_ID_MAHATENDERS")
 
 API_URL = "https://etender.mahadiscom.in/eatApp/getTahdrTypeCode/WT"
 ARCHIVE_FILE = "tender_archive.json"
@@ -517,16 +518,23 @@ def job():
     print("✅ All matching tenders grouped by district have been sent.")
 
 def main():
-    print("🚀 Starting Mahadiscom & Mahatenders Bot Service")
-    print("🕒 Checking is scheduled once a day at 09:00 IST.")
-    print("🕒 Checking is scheduled once a day at 18:00 IST.")
-    
-    schedule.every().day.at("09:00").do(job)
-    schedule.every().day.at("18:00").do(job)
-    print("Waiting for scheduled time... (Press Ctrl+C to stop)")
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    """Main entry point to start the bot service or run an immediate job."""
+    print("🚀 Starting Maharashtra Tender Scraper Bot Service")
+
+    # If running in GitHub Actions, execute the job once and exit
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        print("🏃 Running in GitHub Actions mode: Executing job immediately.")
+        job()
+        print("✅ Job complete. Terminating process.")
+    else:
+        # Local mode: schedule periodic checks
+        print("🕒 Local Mode: Checking is scheduled twice a day at 09:00 and 18:00 IST.")
+        schedule.every().day.at("09:00").do(job)
+        schedule.every().day.at("18:00").do(job)
+        print("Waiting for scheduled time... (Press Ctrl+C to stop)")
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()

@@ -24,7 +24,7 @@ jobs:
 
       - name: Install Required Python Packages
         run: |
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 python-telegram-bot python-dotenv schedule
 
       - name: Execute Tender Scraper
         run: python main.py
@@ -40,6 +40,7 @@ jobs:
           WA_INSTANCE: ${{ secrets.WA_INSTANCE }}
           WA_GROUP_MSEDCL: ${{ secrets.WA_GROUP_MSEDCL }}
           WA_GROUP_MAHATENDERS: ${{ secrets.WA_GROUP_MAHATENDERS }}
+          GITHUB_ACTIONS: "true"
 
       - name: Commit and Push Changes to Archive
         run: |
