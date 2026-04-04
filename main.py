@@ -204,33 +204,41 @@ def check_mahatenders(pending_msgs, archive):
 # --- RUNNERS ---
 
 def job():
-    archive = set(load_archive())
+    archive_list = load_archive()
+    archive_set = set(archive_list)
+    new_found_this_run = []
     
     # 1. MSEDCL
     msedcl_results = {}
-    check_tenders(msedcl_results, archive)
+    check_tenders(msedcl_results, archive_set)
     for dist, tenders in msedcl_results.items():
         asyncio.run(send_telegram_message(f"🏙️ **DISTRICT: {dist.upper()} (MSEDCL)**", ID_MSEDCL))
         for ref, msg in tenders:
             asyncio.run(send_telegram_message(msg, ID_MSEDCL))
             send_whatsapp(msg, WA_GROUP_MSEDCL)
-            archive.add(ref)
+            if ref not in archive_set:
+                new_found_this_run.append(ref)
+                archive_set.add(ref)
             time.sleep(1)
     
-    save_archive(list(archive))
-
     # 2. MAHATENDERS
     mahatenders_results = {}
-    check_mahatenders(mahatenders_results, archive)
+    check_mahatenders(mahatenders_results, archive_set)
     for dist, tenders in mahatenders_results.items():
         asyncio.run(send_telegram_message(f"🏙️ **DISTRICT: {dist.upper()} (MAHATENDERS)**", ID_MAHATENDERS))
         for ref, msg in tenders:
             asyncio.run(send_telegram_message(msg, ID_MAHATENDERS))
             send_whatsapp(msg, WA_GROUP_MAHATENDERS)
-            archive.add(ref)
+            if ref not in archive_set:
+                new_found_this_run.append(ref)
+                archive_set.add(ref)
             time.sleep(1)
 
-    save_archive(list(archive))
+    if new_found_this_run:
+        # Prepend new IDs to the top of the existing list
+        updated_archive = new_found_this_run + archive_list
+        save_archive(updated_archive)
+        
     print("✅ Done.")
 
 def main():
