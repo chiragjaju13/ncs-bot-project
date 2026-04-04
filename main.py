@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from telegram import Bot
+from telegram.error import RetryAfter
 from dotenv import load_dotenv
 
 # Try to import schedule for local mode
@@ -84,12 +85,18 @@ async def send_telegram_message(formatted_msg, target_chat_id):
     if not TELEGRAM_BOT_TOKEN or not target_chat_id:
         return False
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    try:
-        await bot.send_message(chat_id=target_chat_id, text=formatted_msg, parse_mode="Markdown")
-        return True
-    except Exception as e:
-        print(f"❌ Telegram Error: {e}")
-        return False
+    for attempt in range(1, 6):
+        try:
+            await bot.send_message(chat_id=target_chat_id, text=formatted_msg, parse_mode="Markdown")
+            return True
+        except RetryAfter as e:
+            print(f"⚠️ Flood control: Waiting {e.retry_after}s (Attempt {attempt}/5)")
+            await asyncio.sleep(e.retry_after)
+        except Exception as e:
+            print(f"❌ Telegram Attempt {attempt}/5 Error: {e}")
+            if attempt < 5:
+                await asyncio.sleep(5)
+    return False
 
 def send_whatsapp(message, group_id):
     if not EVOLUTION_API_URL or not EVOLUTION_API_KEY or not group_id:
@@ -216,7 +223,7 @@ def check_mahatenders(pending_msgs, archive):
                     msg = (
                         f"🏛️ MAHATENDERS ALERT\n\n"
                         f"🏷️ Division: {matched_taluka}\n"
-                        f"🌐 Source: Mahatenders.gov.in\n"
+                        # f"🌐 Source: Mahatenders.gov.in\n"
                         f"🔢 Tender ID: {ref_no}\n"
                         f"📝 Title: {title}\n"
                         f"📅 Published Date: {cols[1].text.strip()}\n"
@@ -242,16 +249,16 @@ def job():
         if not tenders: continue
         has_new = any(ref not in archive_set for ref, msg in tenders)
         if has_new:
-            header_msg = f"🏙️ **DISTRICT: {dist.upper()} (MSEDCL)**"
+            header_msg = f"🏙️ **DISTRICT: {dist.upper()}**"
             asyncio.run(send_telegram_message(header_msg, ID_MSEDCL))
-            time.sleep(1)
+            time.sleep(5)
             for ref, msg in tenders:
                 if ref not in archive_set:
                     asyncio.run(send_telegram_message(msg, ID_MSEDCL))
                     send_whatsapp(msg, WA_GROUP_MSEDCL)
                     archive_set.add(ref)
                     new_ids.append(ref)
-                    time.sleep(1)
+                    time.sleep(5)
 
     # Process MAHATENDERS
     mahatenders_pending = {}
@@ -260,16 +267,16 @@ def job():
         if not tenders: continue
         has_new = any(ref not in archive_set for ref, msg in tenders)
         if has_new:
-            header_msg = f"🏙️ **DISTRICT: {dist.upper()} (MAHATENDERS)**"
+            header_msg = f"🏙️ **DISTRICT: {dist.upper()}**"
             asyncio.run(send_telegram_message(header_msg, ID_MAHATENDERS))
-            time.sleep(1)
+            time.sleep(5)
             for ref, msg in tenders:
                 if ref not in archive_set:
                     asyncio.run(send_telegram_message(msg, ID_MAHATENDERS))
                     send_whatsapp(msg, WA_GROUP_MAHATENDERS)
                     archive_set.add(ref)
                     new_ids.append(ref)
-                    time.sleep(1)
+                    time.sleep(5)
 
     if new_ids:
         save_archive(new_ids + archive_list)
