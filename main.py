@@ -8,10 +8,8 @@ import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from telegram import Bot
-from telegram.error import RetryAfter
 from dotenv import load_dotenv
 
-# Try to import schedule for local mode
 try:
     import schedule
 except ImportError:
@@ -20,20 +18,16 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
-# --- CREDENTIAL MAPPING (Strictly matching your .env and YAML) ---
+# --- CREDENTIALS ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ID_MSEDCL = os.getenv("ID_MSEDCL")
 ID_MAHATENDERS = os.getenv("ID_MAHATENDERS")
-
-# WhatsApp Evolution API
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE")
-
 WA_GROUP_MSEDCL = os.getenv("WA_GROUP_MSEDCL")
 WA_GROUP_MAHATENDERS = os.getenv("WA_GROUP_MAHATENDERS")
 
-# Files and API Endpoints
 API_URL = "https://etender.mahadiscom.in/eatApp/getTahdrTypeCode/WT"
 ARCHIVE_FILE = "tender_archive.json"
 
@@ -59,12 +53,14 @@ DISTRICT_DATA = {
 }
 
 # --- HELPERS ---
-
 def load_archive():
-    if not os.path.exists(ARCHIVE_FILE): return []
+    if not os.path.exists(ARCHIVE_FILE): return {}
     with open(ARCHIVE_FILE, "r", encoding="utf-8") as f:
-        try: return json.load(f)
-        except: return []
+        try:
+            data = json.load(f)
+            # Ensure it's a dictionary for key-value matching
+            return data if isinstance(data, dict) else {}
+        except: return {}
 
 def save_archive(data):
     with open(ARCHIVE_FILE, "w", encoding="utf-8") as f:
@@ -82,25 +78,17 @@ def format_currency(value):
     except: return "Not Specified"
 
 async def send_telegram_message(formatted_msg, target_chat_id):
-    if not TELEGRAM_BOT_TOKEN or not target_chat_id:
-        return False
+    if not TELEGRAM_BOT_TOKEN or not target_chat_id: return False
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    for attempt in range(1, 6):
-        try:
-            await bot.send_message(chat_id=target_chat_id, text=formatted_msg, parse_mode="Markdown")
-            return True
-        except RetryAfter as e:
-            print(f"⚠️ Flood control: Waiting {e.retry_after}s (Attempt {attempt}/5)")
-            await asyncio.sleep(e.retry_after)
-        except Exception as e:
-            print(f"❌ Telegram Attempt {attempt}/5 Error: {e}")
-            if attempt < 5:
-                await asyncio.sleep(5)
-    return False
+    try:
+        await bot.send_message(chat_id=target_chat_id, text=formatted_msg, parse_mode="Markdown")
+        return True
+    except Exception as e:
+        print(f"❌ Telegram Error: {e}")
+        return False
 
 def send_whatsapp(message, group_id):
-    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY or not group_id:
-        return False
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY or not group_id: return False
     endpoint = f"{EVOLUTION_API_URL.rstrip('/')}/message/sendText/{EVOLUTION_INSTANCE}"
     headers = {"apikey": EVOLUTION_API_KEY, "Content-Type": "application/json"}
     payload = {"number": group_id, "text": message, "linkPreview": False}
@@ -110,7 +98,6 @@ def send_whatsapp(message, group_id):
     except: return False
 
 # --- SCRAPER LOGIC ---
-
 def check_msedcl(pending_msgs, archive):
     print(f"[{time.strftime('%H:%M:%S')}] Checking MSEDCL...")
     try:
@@ -119,43 +106,42 @@ def check_msedcl(pending_msgs, archive):
         for item in rows:
             tahdr = item.get("tahdr", {})
             t_no = tahdr.get("tahdrCode", "").strip()
-            if not t_no or t_no in archive: continue
-            
-            desc = item.get("description", "").strip()
-            combined = (desc + " " + t_no).lower()
-            
-            for d_name, talukas in DISTRICT_DATA.items():
-                if d_name.lower() in combined:
-                    matched_taluka = d_name
-                    for t in talukas:
-                        if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
-                            matched_taluka = t.title()
-                            break
+            if not t_no: continue
 
-                    tender_fee_raw = item.get("tahdrFees")
-                    if tender_fee_raw is None:
-                        tender_fee = "Not Specified"
-                    else:
-                        base_fee = float(tender_fee_raw)
-                        gst = base_fee * 0.18
-                        tender_fee = f"₹ {base_fee + gst:,.2f}"
+            current_end_date = format_epoch(item.get('purchaseToDate'))
+            
+            # Logic: If ID not in archive OR ID in archive but date has changed
+            if t_no not in archive or archive.get(t_no) != current_end_date:
+                desc = item.get("description", "").strip()
+                combined = (desc + " " + t_no).lower()
+                
+                for d_name, talukas in DISTRICT_DATA.items():
+                    if d_name.lower() in combined:
+                        matched_taluka = d_name
+                        for t in talukas:
+                            if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
+                                matched_taluka = t.title()
+                                break
 
-                    msg = (
-                        f"🏢 MSEDCL TENDER ALERT\n\n"
-                        f"🏷️ Division: {matched_taluka}\n"
-                        f"🌐 Source: Mahadiscom (MSEDCL)\n"
-                        f"🔢 Tender No: {t_no}\n"
-                        f"📝 Description: {desc}\n"
-                        f"📅 Purchase Start: {format_epoch(item.get('purchaseFromDate'))}\n"
-                        f"⌛ Purchase End: {format_epoch(item.get('purchaseToDate'))}\n"
-                        f"📤 Submission Day: {format_epoch(item.get('technicalBidToDate'), include_time=True)}\n"
-                        f"⚙️ Tech Bid Opening: {format_epoch(item.get('techBidOpenningDate'), include_time=True)}\n"
-                        f"💰 Tender Amount: {format_currency(item.get('estimatedCost'))}\n"
-                        f"💳 EMD Amount: {format_currency(item.get('emdFee'))}\n"
-                        f"📜 Tender Fees: {tender_fee}"
-                    )
-                    pending_msgs.setdefault(d_name, []).append((t_no, msg))
-                    break
+                        tender_fee_raw = item.get("tahdrFees")
+                        tender_fee = "Not Specified" if tender_fee_raw is None else f"₹ {float(tender_fee_raw) * 1.18:,.2f}"
+
+                        msg = (
+                            f"🏢 MSEDCL TENDER ALERT\n\n"
+                            f"🏷️ Division: {matched_taluka}\n"
+                            f"🌐 Source: Mahadiscom (MSEDCL)\n"
+                            f"🔢 Tender No: {t_no}\n"
+                            f"📝 Description: {desc}\n"
+                            f"📅 Purchase Start: {format_epoch(item.get('purchaseFromDate'))}\n"
+                            f"⌛ Purchase End: {current_end_date}\n"
+                            f"📤 Submission Day: {format_epoch(item.get('technicalBidToDate'), include_time=True)}\n"
+                            f"⚙️ Tech Bid Opening: {format_epoch(item.get('techBidOpenningDate'), include_time=True)}\n"
+                            f"💰 Tender Amount: {format_currency(item.get('estimatedCost'))}\n"
+                            f"💳 EMD Amount: {format_currency(item.get('emdFee'))}\n"
+                            f"📜 Tender Fees: {tender_fee}"
+                        )
+                        pending_msgs.setdefault(d_name, []).append((t_no, current_end_date, msg))
+                        break
     except Exception as e: print(f"❌ MSEDCL API Error: {e}")
 
 def fetch_mahatender_details(session, detail_url):
@@ -205,84 +191,75 @@ def check_mahatenders(pending_msgs, archive):
                 cols = row.find_all('td')
                 if len(cols) < 6: continue
                 title = cols[4].text.strip()
+                current_close_date = cols[2].text.strip()
+                
                 id_match = re.search(r'\d{4}_[A-Z]+_\d+_\d+', title)
-                ref_no = id_match.group(0) if id_match else title[:50]
+                t_id = id_match.group(0) if id_match else title[:50]
                 
-                if ref_no in archive: continue
-                
-                combined = title.lower()
-                if dist_name.lower() in combined:
-                    extra = fetch_mahatender_details(s, cols[4].find('a').get('href'))
-                    
-                    matched_taluka = dist_name
-                    for t in talukas:
-                        if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
-                            matched_taluka = t.title()
-                            break
+                # Check Logic
+                if t_id not in archive or archive.get(t_id) != current_close_date:
+                    combined = title.lower()
+                    if dist_name.lower() in combined:
+                        extra = fetch_mahatender_details(s, cols[4].find('a').get('href'))
+                        
+                        matched_taluka = dist_name
+                        for t in talukas:
+                            if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
+                                matched_taluka = t.title()
+                                break
 
-                    msg = (
-                        f"🏛️ MAHATENDERS ALERT\n\n"
-                        f"🏷️ Division: {matched_taluka}\n"
-                        # f"🌐 Source: Mahatenders.gov.in\n"
-                        f"🔢 Tender ID: {ref_no}\n"
-                        f"📝 Title: {title}\n"
-                        f"📅 Published Date: {cols[1].text.strip()}\n"
-                        f"⌛ Closing Date: {cols[2].text.strip()}\n"
-                        f"⚙️ Opening Date: {cols[3].text.strip()}\n"
-                        f"💰 Tender Amount: {extra['amount']}\n"
-                        f"💳 EMD Amount: {extra['emd']}\n"
-                        f"📜 Tender Fee: {extra['fee']}\n"
-                        f"🏢 Organisation: {cols[5].text.strip()}"
-                    )
-                    pending_msgs.setdefault(dist_name, []).append((ref_no, msg))
+                        msg = (
+                            f"🏛️ MAHATENDERS ALERT\n\n"
+                            f"🏷️ Division: {matched_taluka}\n"
+                            f"🌐 Source: Mahatenders.gov.in\n"
+                            f"🔢 Tender ID: {t_id}\n"
+                            f"📝 Title: {title}\n"
+                            f"📅 Published Date: {cols[1].text.strip()}\n"
+                            f"⌛ Closing Date: {current_close_date}\n"
+                            f"⚙️ Opening Date: {cols[3].text.strip()}\n"
+                            f"💰 Tender Amount: {extra['amount']}\n"
+                            f"💳 EMD Amount: {extra['emd']}\n"
+                            f"📜 Tender Fee: {extra['fee']}\n"
+                            f"🏢 Organisation: {cols[5].text.strip()}"
+                        )
+                        pending_msgs.setdefault(dist_name, []).append((t_id, current_close_date, msg))
         except: continue
 
 def job():
-    archive_list = load_archive()
-    archive_set = set(archive_list)
-    new_ids = []
+    archive_dict = load_archive()
+    updated_something = False
 
     # Process MSEDCL
     msedcl_pending = {}
-    check_msedcl(msedcl_pending, archive_set)
+    check_msedcl(msedcl_pending, archive_dict)
     for dist, tenders in msedcl_pending.items():
         if not tenders: continue
-        has_new = any(ref not in archive_set for ref, msg in tenders)
-        if has_new:
-            header_msg = f"🏙️ **DISTRICT: {dist.upper()}**"
-            asyncio.run(send_telegram_message(header_msg, ID_MSEDCL))
-            time.sleep(5)
-            for ref, msg in tenders:
-                if ref not in archive_set:
-                    asyncio.run(send_telegram_message(msg, ID_MSEDCL))
-                    send_whatsapp(msg, WA_GROUP_MSEDCL)
-                    archive_set.add(ref)
-                    new_ids.append(ref)
-                    time.sleep(5)
+        asyncio.run(send_telegram_message(f"🏙️ **DISTRICT: {dist.upper()} (MSEDCL)**", ID_MSEDCL))
+        for t_id, new_date, msg in tenders:
+            asyncio.run(send_telegram_message(msg, ID_MSEDCL))
+            send_whatsapp(msg, WA_GROUP_MSEDCL)
+            archive_dict[t_id] = new_date # Update/Add to dict
+            updated_something = True
+            time.sleep(1)
 
     # Process MAHATENDERS
     mahatenders_pending = {}
-    check_mahatenders(mahatenders_pending, archive_set)
+    check_mahatenders(mahatenders_pending, archive_dict)
     for dist, tenders in mahatenders_pending.items():
         if not tenders: continue
-        has_new = any(ref not in archive_set for ref, msg in tenders)
-        if has_new:
-            header_msg = f"🏙️ **DISTRICT: {dist.upper()}**"
-            asyncio.run(send_telegram_message(header_msg, ID_MAHATENDERS))
-            time.sleep(5)
-            for ref, msg in tenders:
-                if ref not in archive_set:
-                    asyncio.run(send_telegram_message(msg, ID_MAHATENDERS))
-                    send_whatsapp(msg, WA_GROUP_MAHATENDERS)
-                    archive_set.add(ref)
-                    new_ids.append(ref)
-                    time.sleep(5)
+        asyncio.run(send_telegram_message(f"🏙️ **DISTRICT: {dist.upper()} (MAHATENDERS)**", ID_MAHATENDERS))
+        for t_id, new_date, msg in tenders:
+            asyncio.run(send_telegram_message(msg, ID_MAHATENDERS))
+            send_whatsapp(msg, WA_GROUP_MAHATENDERS)
+            archive_dict[t_id] = new_date # Update/Add to dict
+            updated_something = True
+            time.sleep(1)
 
-    if new_ids:
-        save_archive(new_ids + archive_list)
-        print(f"✅ Found and archived {len(new_ids)} new tenders.")
+    if updated_something:
+        save_archive(archive_dict)
+        print(f"✅ Archive updated with new/changed tenders.")
     else:
-        print("ℹ️ No new tenders found in this run.")
+        print("ℹ️ No new or extended tenders found.")
 
 def main():
     print("🚀 Maharashtra Tender Scraper Started")
