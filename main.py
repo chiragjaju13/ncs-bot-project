@@ -68,8 +68,22 @@ def save_archive(data):
 
 def format_epoch(epoch_ms, include_time=False):
     if not epoch_ms: return "N/A"
-    fmt = '%d-%m-%Y %H:%M' if include_time else '%d-%m-%Y'
+    fmt = '%d/%m/%Y %H:%M' if include_time else '%d/%m/%Y'
     return datetime.fromtimestamp(epoch_ms / 1000.0).strftime(fmt)
+
+def normalize_date_str(date_str):
+    """Normalize Mahatenders text dates to DD/MM/YYYY format."""
+    if not date_str: return "N/A"
+    try:
+        # Common formats: 07-Apr-2026, 07-04-2026
+        for fmt in ('%d-%b-%Y', '%d-%m-%Y', '%d-%b-%Y %I:%M %p', '%d-%m-%Y %H:%M'):
+            try:
+                dt = datetime.strptime(date_str.strip(), fmt)
+                return dt.strftime('%d/%m/%Y')
+            except ValueError:
+                continue
+        return date_str.strip().replace('-', '/')
+    except: return date_str.strip()
 
 def format_currency(value):
     try:
@@ -127,10 +141,10 @@ def check_msedcl(pending_msgs, archive):
                         tender_fee = "Not Specified" if tender_fee_raw is None else f"₹ {float(tender_fee_raw) * 1.18:,.2f}"
 
                         msg = (
-                            f"🏢 MSEDCL TENDER ALERT\n\n"
+                            #f"🏢 MSEDCL TENDER ALERT\n\n"
                             f"🏷️ Division: {matched_taluka}\n"
-                            f"🌐 Source: Mahadiscom (MSEDCL)\n"
-                            f"🔢 Tender No: {t_no}\n"
+                            #f"🌐 Source: Mahadiscom (MSEDCL)\n"
+                            f"🔢 Tender No: `{t_no}`\n"
                             f"📝 Description: {desc}\n"
                             f"📅 Purchase Start: {format_epoch(item.get('purchaseFromDate'))}\n"
                             f"⌛ Purchase End: {current_end_date}\n"
@@ -209,14 +223,14 @@ def check_mahatenders(pending_msgs, archive):
                                 break
 
                         msg = (
-                            f"🏛️ MAHATENDERS ALERT\n\n"
+                            #f"🏛️ MAHATENDERS ALERT\n\n"
                             f"🏷️ Division: {matched_taluka}\n"
-                            f"🌐 Source: Mahatenders.gov.in\n"
-                            f"🔢 Tender ID: {t_id}\n"
+                            #f"🌐 Source: Mahatenders.gov.in\n"
+                            f"🔢 Tender ID: `{t_id}`\n"
                             f"📝 Title: {title}\n"
-                            f"📅 Published Date: {cols[1].text.strip()}\n"
-                            f"⌛ Closing Date: {current_close_date}\n"
-                            f"⚙️ Opening Date: {cols[3].text.strip()}\n"
+                            f"📅 Published Date: {normalize_date_str(cols[1].text.strip())}\n"
+                            f"⌛ Closing Date: {normalize_date_str(current_close_date)}\n"
+                            f"⚙️ Opening Date: {normalize_date_str(cols[3].text.strip())}\n"
                             f"💰 Tender Amount: {extra['amount']}\n"
                             f"💳 EMD Amount: {extra['emd']}\n"
                             f"📜 Tender Fee: {extra['fee']}\n"
@@ -227,37 +241,46 @@ def check_mahatenders(pending_msgs, archive):
 
 def job():
     archive_dict = load_archive()
-    updated_something = False
+    new_found_this_run = {} # To keep new ones at the top
 
     # Process MSEDCL
     msedcl_pending = {}
     check_msedcl(msedcl_pending, archive_dict)
     for dist, tenders in msedcl_pending.items():
         if not tenders: continue
-        asyncio.run(send_telegram_message(f"🏙️ **DISTRICT: {dist.upper()} (MSEDCL)**", ID_MSEDCL))
+        # Send header
+        header = f"🏙️ **DISTRICT: {dist.upper()}**"
+        header_sent = asyncio.run(send_telegram_message(header, ID_MSEDCL))
+        if header_sent: time.sleep(5)
+        
         for t_id, new_date, msg in tenders:
-            asyncio.run(send_telegram_message(msg, ID_MSEDCL))
-            send_whatsapp(msg, WA_GROUP_MSEDCL)
-            archive_dict[t_id] = new_date # Update/Add to dict
-            updated_something = True
-            time.sleep(1)
+            if asyncio.run(send_telegram_message(msg, ID_MSEDCL)):
+                send_whatsapp(msg, WA_GROUP_MSEDCL)
+                new_found_this_run[t_id] = new_date 
+                time.sleep(5)
 
     # Process MAHATENDERS
     mahatenders_pending = {}
-    check_mahatenders(mahatenders_pending, archive_dict)
+    # Use archive_dict updated with MSEDCL items for immediate deduplication if needed
+    check_mahatenders(mahatenders_pending, {**archive_dict, **new_found_this_run})
     for dist, tenders in mahatenders_pending.items():
         if not tenders: continue
-        asyncio.run(send_telegram_message(f"🏙️ **DISTRICT: {dist.upper()} (MAHATENDERS)**", ID_MAHATENDERS))
+        # Send header
+        header = f"🏙️ **DISTRICT: {dist.upper()}**"
+        header_sent = asyncio.run(send_telegram_message(header, ID_MAHATENDERS))
+        if header_sent: time.sleep(5)
+        
         for t_id, new_date, msg in tenders:
-            asyncio.run(send_telegram_message(msg, ID_MAHATENDERS))
-            send_whatsapp(msg, WA_GROUP_MAHATENDERS)
-            archive_dict[t_id] = new_date # Update/Add to dict
-            updated_something = True
-            time.sleep(1)
+            if asyncio.run(send_telegram_message(msg, ID_MAHATENDERS)):
+                send_whatsapp(msg, WA_GROUP_MAHATENDERS)
+                new_found_this_run[t_id] = new_date
+                time.sleep(5)
 
-    if updated_something:
-        save_archive(archive_dict)
-        print(f"✅ Archive updated with new/changed tenders.")
+    if new_found_this_run:
+        # Prepend new items to the dictionary
+        final_archive = {**new_found_this_run, **archive_dict}
+        save_archive(final_archive)
+        print(f"✅ Archive updated with {len(new_found_this_run)} new/changed tenders at the top.")
     else:
         print("ℹ️ No new or extended tenders found.")
 
