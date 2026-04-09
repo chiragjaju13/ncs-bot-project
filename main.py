@@ -5,7 +5,7 @@ import requests
 import urllib3
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from telegram import Bot
 from dotenv import load_dotenv
@@ -53,6 +53,23 @@ DISTRICT_DATA = {
 }
 
 # --- HELPERS ---
+def get_matched_district_taluka(combined_text, district_name, talukas):
+    matched = False
+    for t in talukas:
+        if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined_text):
+            matched = True
+            break
+            
+    if matched:
+        display_taluka = district_name
+        for t in talukas:
+            if t.islower(): continue
+            if t.lower() != district_name.lower() and re.search(r'\b' + re.escape(t.lower()) + r'\b', combined_text):
+                display_taluka = t.title()
+                break
+        return True, display_taluka
+    return False, None
+
 def load_archive():
     if not os.path.exists(ARCHIVE_FILE): return {}
     with open(ARCHIVE_FILE, "r", encoding="utf-8") as f:
@@ -66,17 +83,27 @@ def save_archive(data):
     with open(ARCHIVE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 def format_epoch(epoch_ms, include_time=False):
     if not epoch_ms: return "N/A"
     fmt = '%d/%m/%Y %H:%M' if include_time else '%d/%m/%Y'
-    return datetime.fromtimestamp(epoch_ms / 1000.0).strftime(fmt)
+    dt_utc = datetime.fromtimestamp(epoch_ms / 1000.0, timezone.utc)
+    return dt_utc.astimezone(IST).strftime(fmt)
 
 def normalize_date_str(date_str):
-    """Normalize Mahatenders text dates to DD/MM/YYYY format."""
+    """Normalize Mahatenders text dates to DD/MM/YYYY or DD/MM/YYYY HH:MM (IST, already in IST from site)."""
     if not date_str: return "N/A"
     try:
-        # Common formats: 07-Apr-2026, 07-04-2026
-        for fmt in ('%d-%b-%Y', '%d-%m-%Y', '%d-%b-%Y %I:%M %p', '%d-%m-%Y %H:%M'):
+        # Formats with time (preserve time in 24h)
+        for fmt in ('%d-%b-%Y %I:%M %p', '%d-%m-%Y %H:%M'):
+            try:
+                dt = datetime.strptime(date_str.strip(), fmt)
+                return dt.strftime('%d/%m/%Y %H:%M')
+            except ValueError:
+                continue
+        # Formats without time (date only)
+        for fmt in ('%d-%b-%Y', '%d-%m-%Y'):
             try:
                 dt = datetime.strptime(date_str.strip(), fmt)
                 return dt.strftime('%d/%m/%Y')
@@ -84,6 +111,35 @@ def normalize_date_str(date_str):
                 continue
         return date_str.strip().replace('-', '/')
     except: return date_str.strip()
+
+def is_same_date(d1, d2):
+    if d1 == d2: return True
+    if not d1 or not d2: return False
+    
+    def parse_date(d):
+        d_str = str(d).strip()
+        formats = [
+            '%d/%m/%Y %H:%M', '%d/%m/%Y',
+            '%d-%m-%Y %H:%M', '%d-%m-%Y',
+            '%d-%b-%Y %I:%M %p', '%d-%b-%Y'
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(d_str, fmt)
+            except ValueError:
+                continue
+        return None
+
+    dt1 = parse_date(d1)
+    dt2 = parse_date(d2)
+    
+    if dt1 and dt2:
+        if dt1 == dt2: return True
+        if dt1.hour == 0 and dt1.minute == 0 and dt1.date() == dt2.date(): return True
+        if dt2.hour == 0 and dt2.minute == 0 and dt2.date() == dt1.date(): return True
+        return False
+        
+    return str(d1).strip().replace('-', '/') == str(d2).strip().replace('-', '/')
 
 def format_currency(value):
     try:
@@ -122,40 +178,43 @@ def check_msedcl(pending_msgs, archive):
             t_no = tahdr.get("tahdrCode", "").strip()
             if not t_no: continue
 
-            current_end_date = format_epoch(item.get('purchaseToDate'))
+            # Track using Submission End Date in MSEDCL
+            submission_date = format_epoch(item.get('technicalBidToDate'), include_time=True)
             
-            # Logic: If ID not in archive OR ID in archive but date has changed
-            if t_no not in archive or archive.get(t_no) != current_end_date:
-                desc = item.get("description", "").strip()
-                combined = (desc + " " + t_no).lower()
-                
-                for d_name, talukas in DISTRICT_DATA.items():
-                    if d_name.lower() in combined:
-                        matched_taluka = d_name
-                        for t in talukas:
-                            if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
-                                matched_taluka = t.title()
-                                break
+            is_updated = False
+            if t_no in archive:
+                if is_same_date(archive.get(t_no), submission_date):
+                    continue  # Date hasn't changed
+                else:
+                    is_updated = True
+            
+            desc = item.get("description", "").strip()
+            combined = (desc + " " + t_no).lower()
+            
+            for d_name, talukas in DISTRICT_DATA.items():
+                matched, matched_taluka = get_matched_district_taluka(combined, d_name, talukas)
+                if matched:
+                    tender_fee_raw = item.get("tahdrFees")
+                    tender_fee = "Not Specified" if tender_fee_raw is None else f"₹ {float(tender_fee_raw) * 1.18:,.2f}"
 
-                        tender_fee_raw = item.get("tahdrFees")
-                        tender_fee = "Not Specified" if tender_fee_raw is None else f"₹ {float(tender_fee_raw) * 1.18:,.2f}"
-
-                        msg = (
-                            #f"🏢 MSEDCL TENDER ALERT\n\n"
-                            f"🏷️ Division: {matched_taluka}\n"
-                            #f"🌐 Source: Mahadiscom (MSEDCL)\n"
-                            f"🔢 Tender No: `{t_no}`\n"
-                            f"📝 Description: {desc}\n"
-                            f"📅 Purchase Start: {format_epoch(item.get('purchaseFromDate'))}\n"
-                            f"⌛ Purchase End: {current_end_date}\n"
-                            f"📤 Submission Day: {format_epoch(item.get('technicalBidToDate'), include_time=True)}\n"
-                            f"⚙️ Tech Bid Opening: {format_epoch(item.get('techBidOpenningDate'), include_time=True)}\n"
-                            f"💰 Tender Amount: {format_currency(item.get('estimatedCost'))}\n"
-                            f"💳 EMD Amount: {format_currency(item.get('emdFee'))}\n"
-                            f"📜 Tender Fees: {tender_fee}"
-                        )
-                        pending_msgs.setdefault(d_name, []).append((t_no, current_end_date, msg))
-                        break
+                    msg = (
+                        f"🏷️ Division: {matched_taluka}\n"
+                        f"🔢 Tender No: `{t_no}`\n"
+                        f"📝 Description: {desc}\n"
+                        f"📅 Purchase Start: {format_epoch(item.get('purchaseFromDate'))}\n"
+                        f"⌛ Purchase End: {format_epoch(item.get('purchaseToDate'))}\n"
+                        f"📤 Submission Day: {submission_date}\n"
+                        f"⚙️ Tech Bid Opening: {format_epoch(item.get('techBidOpenningDate'), include_time=True)}\n"
+                        f"💰 Tender Amount: {format_currency(item.get('estimatedCost'))}\n"
+                        f"💳 EMD Amount: {format_currency(item.get('emdFee'))}\n"
+                        f"📜 Tender Fees: {tender_fee}"
+                    )
+                    
+                    if is_updated:
+                        msg = f"🔄 **UPDATED / REFLOATED TENDER** 🔄\n*(Previous Date: {archive.get(t_no)})*\n\n" + msg
+                        
+                    pending_msgs.setdefault(d_name, []).append((t_no, submission_date, msg, is_updated, desc))
+                    break
     except Exception as e: print(f"❌ MSEDCL API Error: {e}")
 
 def fetch_mahatender_details(session, detail_url):
@@ -211,37 +270,42 @@ def check_mahatenders(pending_msgs, archive):
                 t_id = id_match.group(0) if id_match else title[:50]
                 
                 # Check Logic
-                if t_id not in archive or archive.get(t_id) != current_close_date:
-                    combined = title.lower()
-                    if dist_name.lower() in combined:
-                        extra = fetch_mahatender_details(s, cols[4].find('a').get('href'))
+                is_updated = False
+                if t_id in archive:
+                    if is_same_date(archive.get(t_id), current_close_date):
+                        continue
+                    else:
+                        is_updated = True
                         
-                        matched_taluka = dist_name
-                        for t in talukas:
-                            if re.search(r'\b' + re.escape(t.lower()) + r'\b', combined):
-                                matched_taluka = t.title()
-                                break
+                combined = title.lower()
+                matched, matched_taluka = get_matched_district_taluka(combined, dist_name, talukas)
+                if matched:
+                    extra = fetch_mahatender_details(s, cols[4].find('a').get('href'))
 
-                        msg = (
-                            #f"🏛️ MAHATENDERS ALERT\n\n"
-                            f"🏷️ Division: {matched_taluka}\n"
-                            #f"🌐 Source: Mahatenders.gov.in\n"
-                            f"🔢 Tender ID: `{t_id}`\n"
-                            f"📝 Title: {title}\n"
-                            f"📅 Published Date: {normalize_date_str(cols[1].text.strip())}\n"
-                            f"⌛ Closing Date: {normalize_date_str(current_close_date)}\n"
-                            f"⚙️ Opening Date: {normalize_date_str(cols[3].text.strip())}\n"
-                            f"💰 Tender Amount: {extra['amount']}\n"
-                            f"💳 EMD Amount: {extra['emd']}\n"
-                            f"📜 Tender Fee: {extra['fee']}\n"
-                            f"🏢 Organisation: {cols[5].text.strip()}"
-                        )
-                        pending_msgs.setdefault(dist_name, []).append((t_id, current_close_date, msg))
+                    msg = (
+                        f"🏷️ Division: {matched_taluka}\n"
+                        f"🔢 Tender ID: `{t_id}`\n"
+                        f"📝 Title: {title}\n"
+                        f"📅 Published Date: {normalize_date_str(cols[1].text.strip())}\n"
+                        f"⌛ Closing Date: {normalize_date_str(current_close_date)}\n"
+                        f"⚙️ Opening Date: {normalize_date_str(cols[3].text.strip())}\n"
+                        f"💰 Tender Amount: {extra['amount']}\n"
+                        f"💳 EMD Amount: {extra['emd']}\n"
+                        f"📜 Tender Fee: {extra['fee']}\n"
+                        f"🏢 Organisation: {cols[5].text.strip()}"
+                    )
+                    
+                    if is_updated:
+                        msg = f"🔄 **UPDATED / REFLOATED TENDER** 🔄\n*(Previous Date: {archive.get(t_id)})*\n\n" + msg
+                        
+                    pending_msgs.setdefault(dist_name, []).append((t_id, current_close_date, msg, is_updated, title))
         except: continue
 
 def job():
     archive_dict = load_archive()
     new_found_this_run = {} # To keep new ones at the top
+
+    sent_in_this_run = set()
 
     # Process MSEDCL
     msedcl_pending = {}
@@ -253,10 +317,13 @@ def job():
         header_sent = asyncio.run(send_telegram_message(header, ID_MSEDCL))
         if header_sent: time.sleep(5)
         
-        for t_id, new_date, msg in tenders:
+        for t_id, new_date, msg, is_updated, title_or_desc in tenders:
+            if t_id in sent_in_this_run:
+                continue
             if asyncio.run(send_telegram_message(msg, ID_MSEDCL)):
                 send_whatsapp(msg, WA_GROUP_MSEDCL)
-                new_found_this_run[t_id] = new_date 
+                new_found_this_run[t_id] = new_date
+                sent_in_this_run.add(t_id)
                 time.sleep(5)
 
     # Process MAHATENDERS
@@ -265,20 +332,33 @@ def job():
     check_mahatenders(mahatenders_pending, {**archive_dict, **new_found_this_run})
     for dist, tenders in mahatenders_pending.items():
         if not tenders: continue
+        
+        # Filter duplicates within the same run before logging the header
+        unique_tenders = [t for t in tenders if t[0] not in sent_in_this_run]
+        if not unique_tenders: continue
+
         # Send header
         header = f"🏙️ **DISTRICT: {dist.upper()}**"
         header_sent = asyncio.run(send_telegram_message(header, ID_MAHATENDERS))
         if header_sent: time.sleep(5)
         
-        for t_id, new_date, msg in tenders:
+        for t_id, new_date, msg, is_updated, title_or_desc in unique_tenders:
             if asyncio.run(send_telegram_message(msg, ID_MAHATENDERS)):
                 send_whatsapp(msg, WA_GROUP_MAHATENDERS)
                 new_found_this_run[t_id] = new_date
+                sent_in_this_run.add(t_id)
                 time.sleep(5)
 
     if new_found_this_run:
-        # Prepend new items to the dictionary
-        final_archive = {**new_found_this_run, **archive_dict}
+        # Save new items and properly overwrite old ones without altering dict order of new items
+        final_archive = {}
+        # 1. New or updated ones first, in reverse order so the last sent message is at the very top
+        for k, v in reversed(list(new_found_this_run.items())):
+            final_archive[k] = v
+        # 2. Existing ones added next, if they weren't overwritten
+        for k, v in archive_dict.items():
+            if k not in final_archive:
+                final_archive[k] = v
         save_archive(final_archive)
         print(f"✅ Archive updated with {len(new_found_this_run)} new/changed tenders at the top.")
     else:
