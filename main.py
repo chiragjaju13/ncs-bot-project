@@ -312,14 +312,17 @@ def job():
     check_msedcl(msedcl_pending, archive_dict)
     for dist, tenders in msedcl_pending.items():
         if not tenders: continue
-        # Send header
+
+        # Filter duplicates within the same run before sending the header
+        unique_tenders = [t for t in tenders if t[0] not in sent_in_this_run]
+        if not unique_tenders: continue
+
+        # Send header only if there are unique tenders to follow
         header = f"🏙️ **DISTRICT: {dist.upper()}**"
         header_sent = asyncio.run(send_telegram_message(header, ID_MSEDCL))
         if header_sent: time.sleep(5)
-        
-        for t_id, new_date, msg, is_updated, title_or_desc in tenders:
-            if t_id in sent_in_this_run:
-                continue
+
+        for t_id, new_date, msg, is_updated, title_or_desc in unique_tenders:
             if asyncio.run(send_telegram_message(msg, ID_MSEDCL)):
                 send_whatsapp(msg, WA_GROUP_MSEDCL)
                 new_found_this_run[t_id] = new_date
