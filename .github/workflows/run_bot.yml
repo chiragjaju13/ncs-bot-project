@@ -48,9 +48,9 @@ jobs:
         run: |
           git config --global user.name "chiragjaju13"
           git config --global user.email "197034261+chiragjaju13@users.noreply.github.com"
-          # git config --global user.name "TenderBot"
-          # git config --global user.email "bot@tender.com"
           git add tender_archive.json
           # The "|| exit 0" prevents the action from failing if there are no new tenders to commit
           git commit -m "Update tender archive: $(date +'%Y-%m-%d %H:%M')" || exit 0
           git push
+        # git config --global user.name "TenderBot"
+        # git config --global user.email "bot@tender.com"
